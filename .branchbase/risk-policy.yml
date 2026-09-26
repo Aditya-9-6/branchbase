@@ -1,0 +1,36 @@
+# .branchbase/risk-policy.yml
+# BranchBase Risk Gate Configuration
+version: 1
+
+# Action mapping per detected risk level:
+# - allow:   Permit migration quietly
+# - warn:    Print warning and continue
+# - confirm: Ask interactive confirmation [y/N]
+# - block:   Abort execution unless --force is passed
+on_risk:
+  LOW: allow
+  MEDIUM: warn
+  HIGH: confirm
+  CRITICAL: block
+
+# If Jev confidence is below this threshold, automatically escalate to the next risk level (e.g. LOW -> MEDIUM)
+confidence_threshold: 0.75
+
+# Fallback behavior when Jev/OpenRouter is unreachable (offline, bad API key, network timeout)
+on_jev_unavailable: warn
+
+# SQL patterns that immediately escalate to CRITICAL without API calls
+always_critical:
+  - "DROP TABLE"
+  - "TRUNCATE"
+  - "DROP DATABASE"
+  - "DROP SCHEMA"
+
+# Exclude specific migration folders from risk gate evaluation
+exclude_paths:
+  - "migrations/seeds/**"
+  - "migrations/test_data/**"
+
+# Output format: pretty | json | github-annotation
+report_format: pretty
+save_report: .branchbase/last-risk-report.json

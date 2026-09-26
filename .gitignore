@@ -24,8 +24,9 @@ Thumbs.db
 *.swp
 *.swo
 
-# Local BranchBase State & Logs
-.branchbase/
+# Local BranchBase State, Cache & Logs
+.branchbase/cache/
+.branchbase/last-risk-report.json
 *.log
 
 # Environment variables
