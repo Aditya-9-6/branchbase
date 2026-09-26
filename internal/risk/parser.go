@@ -24,6 +24,8 @@ var (
 	reDropColumn    = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+DROP\s+(?:COLUMN\s+)?([^\s;,]+)`)
 	reAlterColType  = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+ALTER\s+(?:COLUMN\s+)?([^\s;]+)\s+TYPE\s+([^;,]+)`)
 	reModifyColumn  = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+MODIFY\s+(?:COLUMN\s+)?([^\s;,]+)`)
+	reChangeColumn  = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+CHANGE\s+(?:COLUMN\s+)?([^\s;]+)\s+([^\s;,]+)`)
+	reDropForeignKey= regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+DROP\s+FOREIGN\s+KEY\s+([^\s;,]+)`)
 	reDropConstraint= regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+DROP\s+CONSTRAINT\s+([^\s;,]+)`)
 	reDropIndex     = regexp.MustCompile(`(?i)^\s*DROP\s+INDEX(?:\s+IF\s+EXISTS)?\s+([^\s;,]+)`)
 	reCreateIndex   = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+UNIQUE)?\s+INDEX(?:\s+CONCURRENTLY)?\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s;]+)\s+ON\s+([^\s;(]+)`)
@@ -217,6 +219,27 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 			TargetColumn: CleanIdentifier(m[2]),
 			RawSQL:       trimmed,
 			LineNumber:   line,
+		}
+	}
+
+	// 5b. CHANGE COLUMN (MySQL)
+	if m := reChangeColumn.FindStringSubmatch(trimmed); len(m) > 3 {
+		return DDLOperation{
+			Type:         "ALTER_TYPE",
+			TargetTable:  CleanIdentifier(m[1]),
+			TargetColumn: CleanIdentifier(m[2]),
+			RawSQL:       trimmed,
+			LineNumber:   line,
+		}
+	}
+
+	// 5c. DROP FOREIGN KEY (MySQL)
+	if m := reDropForeignKey.FindStringSubmatch(trimmed); len(m) > 2 {
+		return DDLOperation{
+			Type:        "DROP_CONSTRAINT",
+			TargetTable: CleanIdentifier(m[1]),
+			RawSQL:      trimmed,
+			LineNumber:  line,
 		}
 	}
 

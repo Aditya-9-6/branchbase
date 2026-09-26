@@ -85,6 +85,36 @@ func TestDDLParserOperations(t *testing.T) {
 			targetTable:  "users",
 			targetColumn: "phone",
 		},
+		// MySQL Dialect tests
+		{
+			sql:          "ALTER TABLE products MODIFY COLUMN price DECIMAL(10,2);",
+			expectedType: "ALTER_TYPE",
+			targetTable:  "products",
+			targetColumn: "price",
+		},
+		{
+			sql:          "ALTER TABLE products CHANGE COLUMN old_sku new_sku VARCHAR(50);",
+			expectedType: "ALTER_TYPE",
+			targetTable:  "products",
+			targetColumn: "old_sku",
+		},
+		{
+			sql:          "ALTER TABLE orders DROP FOREIGN KEY fk_customer_id;",
+			expectedType: "DROP_CONSTRAINT",
+			targetTable:  "orders",
+		},
+		// SQLite Dialect tests
+		{
+			sql:          "ALTER TABLE items RENAME COLUMN desc TO description;",
+			expectedType: "RENAME_COLUMN",
+			targetTable:  "items",
+			targetColumn: "desc",
+		},
+		{
+			sql:          "ALTER TABLE old_items RENAME TO new_items;",
+			expectedType: "RENAME_TABLE",
+			targetTable:  "old_items",
+		},
 	}
 
 	for _, tt := range tests {
