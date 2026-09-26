@@ -118,7 +118,7 @@ func (h *HeuristicClassifier) Classify(ctx context.Context, input Classification
 			exclusiveLock = true
 			flags = append(flags, fmt.Sprintf("ALTER COLUMN TYPE %s.%s", op.TargetTable, op.TargetColumn))
 			details = append(details, fmt.Sprintf("Changing column type for %s.%s can cause data truncation, type cast failures, or full table rewrite.", op.TargetTable, op.TargetColumn))
-			suggestions = append(suggestions, fmt.Sprintf("Add a new column with target type, dual-write in application, backfill, and drop old column."))
+			suggestions = append(suggestions, "Add a new column with target type, dual-write in application, backfill, and drop old column.")
 
 		case "DROP_CONSTRAINT":
 			level = maxLevel(level, RiskHigh)
