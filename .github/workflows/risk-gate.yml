@@ -1,0 +1,43 @@
+name: BranchBase Risk Gate Check
+
+on:
+  pull_request:
+    paths:
+      - 'migrations/**'
+      - 'db/migrations/**'
+      - 'sql/**'
+      - '**/*.sql'
+      - '.branchbase/risk-policy.yml'
+
+concurrency:
+  group: risk-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  risk-gate:
+    name: Schema Migration Risk Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build BranchBase CLI
+        run: go build -o /usr/local/bin/branchbase ./cmd/branchbase
+
+      - name: Evaluate Migration Risk Gate
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          echo "🛡️ Evaluating schema migration risk..."
+          branchbase risk check --branch "${{ github.head_ref }}" --json
