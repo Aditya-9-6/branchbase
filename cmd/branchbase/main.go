@@ -46,6 +46,10 @@ Hook Management:
   hooks uninstall  Remove BranchBase hooks from .git/hooks/
   hooks status     Check if Git hooks are installed and active
 
+Risk Gate (Schema Analysis):
+  risk analyze <file>  Analyze a migration SQL file for destructive schema risks
+  risk check           Verify pending migrations against .branchbase/risk-policy.yml
+
 Other:
   version       Print the version of BranchBase
   completion    Print shell completion script (bash|zsh|fish|powershell)
@@ -156,6 +160,9 @@ func main() {
 
 	case "__complete":
 		runComplete(cwd, os.Args[2:])
+
+	case "risk":
+		runRisk(cwd, os.Args[2:])
 
 	case "hook-trigger":
 		runHookTrigger(cwd, os.Args[2:])
