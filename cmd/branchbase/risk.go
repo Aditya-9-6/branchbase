@@ -118,6 +118,17 @@ func resolveIntrospector(cwd string, cfg *config.Config) risk.SchemaIntrospector
 	return risk.NewMockIntrospector()
 }
 
+func resolveClassifier(offline bool) risk.RiskClassifier {
+	if offline {
+		return risk.NewHeuristicClassifier()
+	}
+	jevCfg := risk.LoadJevConfigFromEnv()
+	if jevCfg.APIKey != "" {
+		return risk.NewJevClassifier(jevCfg)
+	}
+	return risk.NewHeuristicClassifier()
+}
+
 func runRiskAnalyze(cwd, targetFile string, jsonOutput, githubOutput, offline bool) {
 	fullPath := targetFile
 	if !filepath.IsAbs(fullPath) {
@@ -140,6 +151,7 @@ func runRiskAnalyze(cwd, targetFile string, jsonOutput, githubOutput, offline bo
 		RepoRoot:     cwd,
 		Engine:       engine,
 		Offline:      offline,
+		Classifier:   resolveClassifier(offline),
 		Introspector: resolveIntrospector(cwd, cfg),
 	})
 	if err != nil {
@@ -196,6 +208,7 @@ func runRiskCheck(cwd, branchName, policyPath string, force, offline, jsonOutput
 		Offline:      offline,
 		Force:        force,
 		PolicyPath:   policyPath,
+		Classifier:   resolveClassifier(offline),
 		Introspector: resolveIntrospector(cwd, cfg),
 	})
 	if err != nil {
