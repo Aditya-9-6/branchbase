@@ -52,12 +52,13 @@ func TestPostgreSQLE2EIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect to appDB: %v", err)
 	}
-	defer appDB.Close()
 
 	_, err = appDB.Exec("CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT); INSERT INTO users (name) VALUES ('Alice');")
 	if err != nil {
+		_ = appDB.Close()
 		t.Fatalf("failed to seed users table: %v", err)
 	}
+	_ = appDB.Close()
 
 	// 2. Start BranchBase Proxy
 	tempDir := t.TempDir()
