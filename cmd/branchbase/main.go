@@ -782,6 +782,41 @@ func runHookTrigger(cwd string, args []string) {
 		return
 	}
 
+	// Evaluate migration risk before provisioning
+	if analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
+		RepoRoot:     cwd,
+		Engine:       cfg.Driver,
+		Introspector: resolveIntrospector(cwd, cfg),
+	}); err == nil {
+		var assessedRisks []risk.MigrationRisk
+		candidates := []string{"migrations", "db/migrations", "sql", "migration"}
+		for _, dir := range candidates {
+			fullDir := filepath.Join(cwd, dir)
+			if entries, err := os.ReadDir(fullDir); err == nil {
+				for _, entry := range entries {
+					if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+						mFile := filepath.Join(dir, entry.Name())
+						if content, err := os.ReadFile(filepath.Join(cwd, mFile)); err == nil {
+							if r, err := analyzer.AnalyzeSQL(ctx, mFile, string(content)); err == nil {
+								assessedRisks = append(assessedRisks, *r)
+							}
+						}
+					}
+				}
+				if len(assessedRisks) > 0 {
+					break
+				}
+			}
+		}
+
+		report := analyzer.EvaluateReport(assessedRisks, sanitized)
+		_ = analyzer.SaveReport(report)
+		if report.Blocked {
+			logHookError(cwd, fmt.Sprintf("branch %q provisioning paused: risk gate policy evaluated CRITICAL risk", sanitized))
+			return
+		}
+	}
+
 	if err := drv.CreateBranch(ctx, defaultBranch, sanitized); err != nil {
 		logHookError(cwd, fmt.Sprintf("failed to pre-warm branch %q: %v", sanitized, err))
 	}
