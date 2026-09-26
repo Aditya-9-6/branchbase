@@ -139,8 +139,8 @@ branchbase/
 2. **Identifier Sanitization:** Special characters like `/` or `-` in branch names (e.g. `feature/stripe-v2`) are converted into safe database identifiers (`feature_stripe_v2`).
 3. **Copy-on-Write Snapshot:**
    * **PostgreSQL:** Disconnects lingering connections to the template and executes `CREATE DATABASE <target> TEMPLATE <source>;` (instant CoW clone).
-   * **MySQL / MariaDB:** Dynamically clones schemas and tables (`CREATE TABLE ... LIKE`, `INSERT INTO ... SELECT`) with zero-downtime transactional consistency.
-   * **SQLite:** Issues `PRAGMA wal_checkpoint(TRUNCATE);` and performs a filesystem reflink/clone (`clonefile()` or `FICLONE`).
+   * **MySQL / MariaDB:** Copies schemas and rows table by table (`CREATE TABLE ... LIKE`, `INSERT INTO ... SELECT`); concurrent writes to the source are not captured from a single transaction snapshot.
+   * **SQLite:** Performs a filesystem reflink/clone (`clonefile()` or `FICLONE`) only when the source has no active WAL/SHM/journal sidecars; otherwise it refuses the snapshot until clients stop and the database is checkpointed.
    * **Docker Compose:** Automatically inspects `docker-compose.yml` to configure database ports and credentials without manual input.
 4. **Transparent Routing:** When your backend app queries `localhost:5432`, the BranchBase proxy intercepts the connection, resolves the active branch database, and forwards traffic directly with sub-millisecond overhead.
 5. **Lifecycle Pruning:** Once a PR is merged into `main`, running `branchbase prune` removes the ephemeral database, freeing disk space.

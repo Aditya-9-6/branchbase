@@ -9,6 +9,7 @@ Security fixes are applied to the active development branch (`main`) and release
 | Version | Supported |
 | :--- | :--- |
 | `0.3.x` | Yes |
+| `0.2.x` | No (Superseded) |
 | `0.1.x` | No (Superseded) |
 | `< 0.1.0` | No |
 
@@ -40,9 +41,9 @@ To help us triage and resolve the issue quickly, please include:
 
 ## Security Design Principles in BranchBase
 
-1. **Localhost Isolation:** The BranchBase proxy binds strictly to `127.0.0.1` by default. It never accepts external network connections unless explicitly configured.
-2. **Non-Destructive Operations:** Default and production branches (`main`, `master`, `production`) are marked as protected and cannot be dropped by automated prune operations.
-3. **Zero Cloud Telemetry:** BranchBase does not send telemetry, metrics, or query logs to any external cloud service. All query inspection happens in memory on your local machine.
+1. **Localhost Isolation:** The BranchBase TCP proxy binds to `127.0.0.1` by default. Set `proxy.listen_host` deliberately to expose it on another interface. Startup packets have a deadline and concurrent connections are capped.
+2. **Non-Destructive Operations:** The configured default Git branch maps to the base database (including custom branch names), and the driver refuses to delete that database.
+3. **No Product Telemetry:** BranchBase does not send telemetry, metrics, or proxy query logs to an external service. If a team configures an external Risk Gate provider (such as Jev/OpenRouter), migration SQL and schema context may be sent to that provider for classification; offline mode avoids those requests. Proxy routing is decided locally from the active Git branch.
 
 ---
 
