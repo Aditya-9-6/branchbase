@@ -3,8 +3,11 @@ package tui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/branchbase/branchbase/internal/config"
@@ -171,6 +174,7 @@ func (m *DashboardModel) RenderView() string {
 	fmt.Fprintf(&b, "  • %-16s %s (%s)\n", "Database Engine:", Bold+driverName+Reset, backendHost)
 	fmt.Fprintf(&b, "  • %-16s Port %d -> Backend %s\n", "Proxy Routing:", proxyPort, backendHost)
 	fmt.Fprintf(&b, "  • %-16s %d database(s) (%s total)\n", "Managed Storage:", len(m.Branches), FormatBytes(m.TotalBytes))
+	b.WriteString(m.renderRiskGateHeader())
 	b.WriteString(Dim + "─────────────────────────────────────────────────────────────────────────────" + Reset + "\n\n")
 
 	// 2. Table Header
@@ -373,4 +377,50 @@ func Run(ctx context.Context, repoPath string, cfg *config.Config, drv driver.Dr
 		// Re-render dashboard
 		_, _ = fmt.Fprint(out, ClearScreen+model.RenderView())
 	}
+}
+
+type cachedRiskSummary struct {
+	Total        int    `json:"total"`
+	OverallLevel string `json:"overall_level"`
+	Blocked      bool   `json:"blocked"`
+}
+
+func (m *DashboardModel) renderRiskGateHeader() string {
+	reportPath := filepath.Join(m.RepoPath, ".branchbase", "last-risk-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		policyPath := filepath.Join(m.RepoPath, ".branchbase", "risk-policy.yml")
+		if _, err := os.Stat(policyPath); err == nil {
+			return fmt.Sprintf("  • %-16s %s (policy active, no scans recorded)\n", "Risk Gate:", Bold+Green+"🛡️ Enabled"+Reset)
+		}
+		return fmt.Sprintf("  • %-16s %s\n", "Risk Gate:", Dim+"Disabled (no risk-policy.yml)"+Reset)
+	}
+
+	var summary cachedRiskSummary
+	if err := json.Unmarshal(data, &summary); err != nil {
+		return fmt.Sprintf("  • %-16s %s\n", "Risk Gate:", Bold+Green+"🛡️ Enabled"+Reset)
+	}
+
+	badge := Green + "🟢 LOW"
+	switch strings.ToUpper(summary.OverallLevel) {
+	case "MEDIUM":
+		badge = Yellow + "🟡 MEDIUM"
+	case "HIGH":
+		badge = Yellow + "🟠 HIGH"
+	case "CRITICAL":
+		badge = Red + "🔴 CRITICAL"
+	}
+
+	statusSuffix := ""
+	if summary.Blocked {
+		statusSuffix = " (" + Red + Bold + "BLOCKED" + Reset + ")"
+	}
+
+	return fmt.Sprintf("  • %-16s %s (%s — %d migration(s))%s\n",
+		"Risk Gate:",
+		Bold+Green+"🛡️ Active"+Reset,
+		badge+Reset,
+		summary.Total,
+		statusSuffix,
+	)
 }
