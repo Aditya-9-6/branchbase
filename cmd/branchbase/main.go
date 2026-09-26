@@ -21,6 +21,7 @@ import (
 	"github.com/branchbase/branchbase/internal/git"
 	"github.com/branchbase/branchbase/internal/hook"
 	"github.com/branchbase/branchbase/internal/proxy"
+	"github.com/branchbase/branchbase/internal/risk"
 	"github.com/branchbase/branchbase/internal/tui"
 )
 
@@ -774,41 +775,36 @@ func runHookTrigger(cwd string, args []string) {
 
 	introspector, closeIntrospector := resolveIntrospector(cfg, defaultBranch)
 	defer closeIntrospector()
-	analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
+	if analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
 		RepoRoot:     cwd,
 		Engine:       cfg.Driver,
 		Introspector: introspector,
-	})
-	if err != nil {
-		logHookError(cwd, fmt.Sprintf("risk analyzer initialization failed for %q: %v", sanitized, err))
-		return
-	}
-	migrationFiles, err := changedMigrationFiles(cwd, defaultBranch)
-	if err != nil {
-		logHookError(cwd, fmt.Sprintf("could not identify changed migrations for %q: %v", sanitized, err))
-		return
-	}
-	var assessedRisks []risk.MigrationRisk
-	for _, migrationFile := range migrationFiles {
-		content, err := os.ReadFile(filepath.Join(cwd, migrationFile))
-		if err != nil {
-			logHookError(cwd, fmt.Sprintf("could not read migration %q: %v", migrationFile, err))
-			return
+	}); err == nil {
+		migrationFiles, err := changedMigrationFiles(cwd, defaultBranch)
+		if err == nil && len(migrationFiles) > 0 {
+			var assessedRisks []risk.MigrationRisk
+			for _, migrationFile := range migrationFiles {
+				content, err := os.ReadFile(filepath.Join(cwd, migrationFile))
+				if err != nil {
+					logHookError(cwd, fmt.Sprintf("could not read migration %q: %v", migrationFile, err))
+					return
+				}
+				assessment, err := analyzer.AnalyzeSQL(ctx, migrationFile, string(content))
+				if err != nil {
+					logHookError(cwd, fmt.Sprintf("could not analyze migration %q: %v", migrationFile, err))
+					return
+				}
+				assessedRisks = append(assessedRisks, *assessment)
+			}
+			report := analyzer.EvaluateReport(assessedRisks, sanitized)
+			if err := analyzer.SaveReport(report); err != nil {
+				logHookError(cwd, fmt.Sprintf("could not save risk report for %q: %v", sanitized, err))
+			}
+			if report.Blocked || report.RequiresConfirm {
+				logHookError(cwd, fmt.Sprintf("branch %q provisioning paused by risk policy (level %s)", sanitized, report.OverallLevel))
+				return
+			}
 		}
-		assessment, err := analyzer.AnalyzeSQL(ctx, migrationFile, string(content))
-		if err != nil {
-			logHookError(cwd, fmt.Sprintf("could not analyze migration %q: %v", migrationFile, err))
-			return
-		}
-		assessedRisks = append(assessedRisks, *assessment)
-	}
-	report := analyzer.EvaluateReport(assessedRisks, sanitized)
-	if err := analyzer.SaveReport(report); err != nil {
-		logHookError(cwd, fmt.Sprintf("could not save risk report for %q: %v", sanitized, err))
-	}
-	if report.Blocked || report.RequiresConfirm {
-		logHookError(cwd, fmt.Sprintf("branch %q provisioning paused by risk policy (level %s)", sanitized, report.OverallLevel))
-		return
 	}
 
 	drv, err := getDriverForConfig(cfg, true)

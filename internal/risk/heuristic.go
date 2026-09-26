@@ -21,10 +21,8 @@ func (h *HeuristicClassifier) Name() string {
 }
 
 var (
-	reNotNullWithoutDefault = regexp.MustCompile(`(?i)ADD(?:\s+COLUMN)?\s+[^\s]+\s+[^\s,;]+(?:\s+NOT\s+NULL)(?!\s+DEFAULT)`)
-	reCascade               = regexp.MustCompile(`(?i)\bCASCADE\b`)
-	reCreateIndexNoConcur   = regexp.MustCompile(`(?i)^\s*CREATE\s+INDEX(?!\s+CONCURRENTLY)`)
-	reDataManipulation      = regexp.MustCompile(`(?i)^\s*(UPDATE|DELETE)\s+`)
+	reCascade          = regexp.MustCompile(`(?i)\bCASCADE\b`)
+	reDataManipulation = regexp.MustCompile(`(?i)^\s*(UPDATE|DELETE)\s+`)
 )
 
 // Classify evaluates the migration operations against deterministic risk heuristics.
@@ -148,7 +146,7 @@ func (h *HeuristicClassifier) Classify(ctx context.Context, input Classification
 
 		case "ADD_INDEX":
 			category = CategoryIndex
-			if strings.EqualFold(input.Engine, "postgres") && reCreateIndexNoConcur.MatchString(op.RawSQL) {
+			if strings.EqualFold(input.Engine, "postgres") && !strings.Contains(upperSQL, "CONCURRENTLY") {
 				level = maxLevel(level, RiskMedium)
 				exclusiveLock = true
 				flags = append(flags, "CREATE INDEX without CONCURRENTLY")
@@ -158,7 +156,7 @@ func (h *HeuristicClassifier) Classify(ctx context.Context, input Classification
 			}
 
 		case "ADD_COLUMN":
-			if reNotNullWithoutDefault.MatchString(op.RawSQL) {
+			if strings.Contains(upperSQL, "NOT NULL") && !strings.Contains(upperSQL, "DEFAULT") {
 				level = maxLevel(level, RiskHigh)
 				exclusiveLock = true
 				flags = append(flags, "ADD COLUMN NOT NULL without DEFAULT")

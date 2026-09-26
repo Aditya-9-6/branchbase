@@ -244,18 +244,41 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 		}
 	}
 
-	// 3. DROP COLUMN
-	if m := reDropColumn.FindStringSubmatch(trimmed); len(m) > 2 {
+	// 3. DROP FOREIGN KEY (MySQL)
+	if m := reDropForeignKey.FindStringSubmatch(trimmed); len(m) > 2 {
 		return DDLOperation{
-			Type:         "DROP_COLUMN",
-			TargetTable:  CleanIdentifier(m[1]),
-			TargetColumn: CleanIdentifier(m[2]),
-			RawSQL:       trimmed,
-			LineNumber:   line,
+			Type:        "DROP_CONSTRAINT",
+			TargetTable: CleanIdentifier(m[1]),
+			RawSQL:      trimmed,
+			LineNumber:  line,
 		}
 	}
 
-	// 4. ALTER COLUMN TYPE
+	// 4. DROP CONSTRAINT
+	if m := reDropConstraint.FindStringSubmatch(trimmed); len(m) > 2 {
+		return DDLOperation{
+			Type:        "DROP_CONSTRAINT",
+			TargetTable: CleanIdentifier(m[1]),
+			RawSQL:      trimmed,
+			LineNumber:  line,
+		}
+	}
+
+	// 5. DROP COLUMN
+	if m := reDropColumn.FindStringSubmatch(trimmed); len(m) > 2 {
+		col := CleanIdentifier(m[2])
+		if !strings.EqualFold(col, "FOREIGN") && !strings.EqualFold(col, "CONSTRAINT") && !strings.EqualFold(col, "INDEX") && !strings.EqualFold(col, "KEY") {
+			return DDLOperation{
+				Type:         "DROP_COLUMN",
+				TargetTable:  CleanIdentifier(m[1]),
+				TargetColumn: col,
+				RawSQL:       trimmed,
+				LineNumber:   line,
+			}
+		}
+	}
+
+	// 6. ALTER COLUMN TYPE
 	if m := reAlterColType.FindStringSubmatch(trimmed); len(m) > 2 {
 		return DDLOperation{
 			Type:         "ALTER_TYPE",
@@ -266,7 +289,7 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 		}
 	}
 
-	// 5. MODIFY COLUMN (MySQL)
+	// 7. MODIFY COLUMN (MySQL)
 	if m := reModifyColumn.FindStringSubmatch(trimmed); len(m) > 2 {
 		return DDLOperation{
 			Type:         "ALTER_TYPE",
@@ -277,7 +300,7 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 		}
 	}
 
-	// 5b. CHANGE COLUMN (MySQL)
+	// 8. CHANGE COLUMN (MySQL)
 	if m := reChangeColumn.FindStringSubmatch(trimmed); len(m) > 3 {
 		return DDLOperation{
 			Type:         "ALTER_TYPE",
@@ -288,17 +311,7 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 		}
 	}
 
-	// 5c. DROP FOREIGN KEY (MySQL)
-	if m := reDropForeignKey.FindStringSubmatch(trimmed); len(m) > 2 {
-		return DDLOperation{
-			Type:        "DROP_CONSTRAINT",
-			TargetTable: CleanIdentifier(m[1]),
-			RawSQL:      trimmed,
-			LineNumber:  line,
-		}
-	}
-
-	// 6. RENAME COLUMN
+	// 9. RENAME COLUMN
 	if m := reRenameColumn.FindStringSubmatch(trimmed); len(m) > 2 {
 		return DDLOperation{
 			Type:         "RENAME_COLUMN",
@@ -309,20 +322,10 @@ func (p *DDLParser) classifyStatement(stmt string, line int) DDLOperation {
 		}
 	}
 
-	// 7. RENAME TABLE
+	// 10. RENAME TABLE
 	if m := reRenameTable.FindStringSubmatch(trimmed); len(m) > 2 {
 		return DDLOperation{
 			Type:        "RENAME_TABLE",
-			TargetTable: CleanIdentifier(m[1]),
-			RawSQL:      trimmed,
-			LineNumber:  line,
-		}
-	}
-
-	// 8. DROP CONSTRAINT
-	if m := reDropConstraint.FindStringSubmatch(trimmed); len(m) > 2 {
-		return DDLOperation{
-			Type:        "DROP_CONSTRAINT",
 			TargetTable: CleanIdentifier(m[1]),
 			RawSQL:      trimmed,
 			LineNumber:  line,

@@ -96,6 +96,9 @@ func SanitizeBranchName(branch string) string {
 func ValidateBranchNameUnique(repoPath, branch string) error {
 	branches, err := ResolveLocalBranches(repoPath)
 	if err != nil {
+		if errors.Is(err, ErrNotAGitRepo) {
+			return nil
+		}
 		return fmt.Errorf("cannot verify branch database identity: %w", err)
 	}
 	current := SanitizeBranchName(branch)
