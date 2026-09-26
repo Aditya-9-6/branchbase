@@ -142,7 +142,7 @@ func TestMySQLCreateBranch(t *testing.T) {
 	ctx := context.Background()
 
 	// Expect create database
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `myapp_dev_feature_b`;")).
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `myapp_dev_feature_b`;")).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	mock.ExpectExec(regexp.QuoteMeta("SET FOREIGN_KEY_CHECKS=0")).
@@ -190,7 +190,7 @@ func TestMySQLCreateBranchRestoresForeignKeyChecksOnInsertError(t *testing.T) {
 	ctx := context.Background()
 	insertErr := errors.New("Error 1452: Cannot add or update a child row: a foreign key constraint fails")
 
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `myapp_dev_feature_b`;")).
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `myapp_dev_feature_b`;")).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta("SET FOREIGN_KEY_CHECKS=0")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -202,6 +202,8 @@ func TestMySQLCreateBranchRestoresForeignKeyChecksOnInsertError(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `myapp_dev_feature_b`.`orders` SELECT * FROM `myapp_dev`.`orders`;")).
 		WillReturnError(insertErr)
 	mock.ExpectExec(regexp.QuoteMeta("SET FOREIGN_KEY_CHECKS=1")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("DROP DATABASE IF EXISTS `myapp_dev_feature_b`;")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	err = drv.CreateBranch(ctx, "main", "feature/b")

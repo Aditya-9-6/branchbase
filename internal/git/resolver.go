@@ -90,6 +90,23 @@ func SanitizeBranchName(branch string) string {
 	return strings.ToLower(sanitized)
 }
 
+// ValidateBranchNameUnique rejects local Git branches that collapse to the same
+// database identifier after sanitization. Sharing one database across distinct
+// branches would violate BranchBase's isolation guarantee.
+func ValidateBranchNameUnique(repoPath, branch string) error {
+	branches, err := ResolveLocalBranches(repoPath)
+	if err != nil {
+		return fmt.Errorf("cannot verify branch database identity: %w", err)
+	}
+	current := SanitizeBranchName(branch)
+	for _, candidate := range branches {
+		if candidate != branch && SanitizeBranchName(candidate) == current {
+			return fmt.Errorf("branch %q and local branch %q map to the same database identifier %q; rename one branch before using BranchBase", branch, candidate, current)
+		}
+	}
+	return nil
+}
+
 // ResolveLocalBranches returns all local branch names in the repository.
 // It delegates to 'git for-each-ref' to account for both loose and packed refs,
 // and falls back to inspecting .git/refs/heads and .git/packed-refs if git exec is unavailable.

@@ -104,6 +104,11 @@ func (d *SqliteDriver) BranchExists(ctx context.Context, branchName string) (boo
 	}
 
 	targetPath := d.formatDBPath(branchName)
+	if _, err := os.Stat(targetPath + ".branchbase-copying"); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("failed to inspect SQLite copy marker for %q: %w", targetPath, err)
+	}
 	info, err := os.Stat(targetPath)
 	if err == nil {
 		return !info.IsDir(), nil
@@ -115,7 +120,7 @@ func (d *SqliteDriver) BranchExists(ctx context.Context, branchName string) (boo
 }
 
 // CreateBranch clones sourceBranch into targetBranch using Copy-on-Write / fast streaming
-func (d *SqliteDriver) CreateBranch(ctx context.Context, sourceBranch, targetBranch string) error {
+func (d *SqliteDriver) CreateBranch(ctx context.Context, sourceBranch, targetBranch string) (retErr error) {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -139,30 +144,76 @@ func (d *SqliteDriver) CreateBranch(ctx context.Context, sourceBranch, targetBra
 	if srcInfo.IsDir() {
 		return fmt.Errorf("source database %q is a directory", sourcePath)
 	}
+	if err := ensureNoSQLiteSidecars(sourcePath); err != nil {
+		return err
+	}
 
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create destination directory for %q: %w", targetPath, err)
 	}
 
-	// Clean up any stale target database files
-	_ = os.Remove(targetPath)
-	_ = os.Remove(targetPath + "-wal")
-	_ = os.Remove(targetPath + "-shm")
+	for _, path := range []string{targetPath, targetPath + "-wal", targetPath + "-shm", targetPath + "-journal"} {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("refusing to overwrite existing SQLite branch artifact %q", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect SQLite branch artifact %q: %w", path, err)
+		}
+	}
+	copyMarker := targetPath + ".branchbase-copying"
+	marker, err := os.OpenFile(copyMarker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to reserve SQLite branch copy %q: %w", targetPath, err)
+	}
+	if err := marker.Close(); err != nil {
+		cleanupErr := os.Remove(copyMarker)
+		return errors.Join(fmt.Errorf("failed to close SQLite copy marker %q: %w", copyMarker, err), cleanupErr)
+	}
+	defer func() {
+		if err := os.Remove(copyMarker); err != nil && !os.IsNotExist(err) {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to remove SQLite copy marker %q: %w", copyMarker, err))
+		}
+	}()
 
-	// Snapshot primary database file
+	reservation, err := os.OpenFile(targetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, srcInfo.Mode().Perm())
+	if err != nil {
+		return fmt.Errorf("failed to reserve SQLite branch path %q: %w", targetPath, err)
+	}
+	if err := reservation.Close(); err != nil {
+		cleanupErr := os.Remove(targetPath)
+		return errors.Join(fmt.Errorf("failed to close SQLite branch reservation %q: %w", targetPath, err), cleanupErr)
+	}
+
 	if err := CloneFile(sourcePath, targetPath); err != nil {
-		return fmt.Errorf("failed to snapshot sqlite database from %q to %q: %w", sourcePath, targetPath, err)
+		cleanupErr := os.Remove(targetPath)
+		return errors.Join(fmt.Errorf("failed to snapshot sqlite database from %q to %q: %w", sourcePath, targetPath, err), cleanupErr)
+	}
+	finalInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		cleanupErr := os.Remove(targetPath)
+		return errors.Join(fmt.Errorf("failed to verify source database after snapshot: %w", err), cleanupErr)
+	}
+	if srcInfo.Size() != finalInfo.Size() || !srcInfo.ModTime().Equal(finalInfo.ModTime()) {
+		cleanupErr := os.Remove(targetPath)
+		return errors.Join(fmt.Errorf("source SQLite database changed during snapshot; retry after writes stop"), cleanupErr)
+	}
+	if err := ensureNoSQLiteSidecars(sourcePath); err != nil {
+		cleanupErr := os.Remove(targetPath)
+		return errors.Join(err, cleanupErr)
 	}
 
-	// Also clone WAL and SHM files if present for consistent crash-recovery state
-	if _, err := os.Stat(sourcePath + "-wal"); err == nil {
-		_ = CloneFile(sourcePath+"-wal", targetPath+"-wal")
-	}
-	if _, err := os.Stat(sourcePath + "-shm"); err == nil {
-		_ = CloneFile(sourcePath+"-shm", targetPath+"-shm")
-	}
+	return nil
+}
 
+func ensureNoSQLiteSidecars(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		path := databasePath + suffix
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("cannot snapshot SQLite database while sidecar %q exists; stop all clients and checkpoint/close the database first", path)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to inspect SQLite sidecar %q: %w", path, err)
+		}
+	}
 	return nil
 }
 
@@ -183,6 +234,11 @@ func (d *SqliteDriver) DeleteBranch(ctx context.Context, branchName string) erro
 	}
 
 	targetPath := d.formatDBPath(branchName)
+	if _, err := os.Stat(targetPath + ".branchbase-copying"); err == nil {
+		return fmt.Errorf("cannot delete SQLite branch %q while a copy is in progress", targetPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to inspect SQLite copy marker for %q: %w", targetPath, err)
+	}
 	if targetPath == d.cfg.BasePath {
 		return fmt.Errorf("cannot delete protected base database %q", d.cfg.BasePath)
 	}
@@ -228,6 +284,9 @@ func (d *SqliteDriver) ListBranches(ctx context.Context) ([]driver.BranchInfo, e
 		}
 
 		name := entry.Name()
+		if _, err := os.Stat(filepath.Join(dir, name+".branchbase-copying")); err == nil {
+			continue
+		}
 		// Exclude SQLite journal, WAL, and SHM sidecar files
 		if strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
 			continue

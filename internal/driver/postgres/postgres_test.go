@@ -327,79 +327,42 @@ func TestCreateBranchWithMock(t *testing.T) {
 
 	d := NewWithDB(Config{BaseDatabase: "myapp_dev"}, db)
 	ctx := context.Background()
+	inspect := func(database string) {
+		mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
+			WithArgs(database).
+			WillReturnRows(sqlmock.NewRows([]string{"description"}))
+	}
 
-	// Case 1: Success
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
-		WithArgs("myapp_dev_feature_auth").
-		WillReturnRows(sqlmock.NewRows([]string{"description"}))
+	// A clone succeeds without terminating sessions connected to its source.
+	inspect("myapp_dev_feature_auth")
 	mock.ExpectExec(`CREATE DATABASE "myapp_dev_feature_auth" TEMPLATE "myapp_dev";`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`COMMENT ON DATABASE "myapp_dev_feature_auth" IS 'branchbase:branch=feature_auth';`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-
 	if err := d.CreateBranch(ctx, "main", "feature_auth"); err != nil {
 		t.Fatalf("CreateBranch failed: %v", err)
 	}
 
-	// Case 2: Create query fails
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
-		WithArgs("myapp_dev_feature_auth").
-		WillReturnRows(sqlmock.NewRows([]string{"description"}))
-	mock.ExpectExec(`CREATE DATABASE "myapp_dev_feature_auth" TEMPLATE "myapp_dev";`).
-		WillReturnError(errors.New("source database is being accessed by other users"))
-
-	if err := d.CreateBranch(ctx, "main", "feature_auth"); err == nil {
-		t.Fatal("expected error on CreateBranch, got nil")
+	// PostgreSQL refuses template cloning while sessions are connected. The
+	// error is actionable, and BranchBase must not disconnect those sessions.
+	inspect("myapp_dev_active_sessions")
+	mock.ExpectExec(`CREATE DATABASE "myapp_dev_active_sessions" TEMPLATE "myapp_dev";`).
+		WillReturnError(&pq.Error{Code: "55006", Message: "source database is being accessed by other users"})
+	err = d.CreateBranch(ctx, "main", "active_sessions")
+	if err == nil || !strings.Contains(err.Error(), "does not terminate unrelated sessions") {
+		t.Fatalf("expected safe active-session error, got %v", err)
 	}
 
-	// Case 3: Collision detected with different branch name
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Reject two local branches that map to the same database name.
 	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
 		WithArgs("myapp_dev_feat_a_b").
 		WillReturnRows(sqlmock.NewRows([]string{"description"}).AddRow("branchbase:branch=feat/a_b"))
-
 	err = d.CreateBranch(ctx, "main", "feat/a-b")
 	if !errors.Is(err, driver.ErrBranchNameCollision) {
 		t.Fatalf("expected ErrBranchNameCollision, got %v", err)
 	}
 
-	// Non-permission termination errors must stop branch creation.
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnError(errors.New("connection broken"))
-	err = d.CreateBranch(ctx, "main", "termination_error")
-	if err == nil || !strings.Contains(err.Error(), "failed to terminate connections to source database") {
-		t.Fatalf("expected contextual termination error, got %v", err)
-	}
-
-	// Permission errors are tolerated because PostgreSQL may deny terminating
-	// sessions even when the following clone operation can proceed.
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnError(&pq.Error{Code: "42501", Message: "permission denied"})
-	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
-		WithArgs("myapp_dev_permission_tolerated").
-		WillReturnRows(sqlmock.NewRows([]string{"description"}))
-	mock.ExpectExec(`CREATE DATABASE "myapp_dev_permission_tolerated" TEMPLATE "myapp_dev";`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`COMMENT ON DATABASE "myapp_dev_permission_tolerated" IS 'branchbase:branch=permission_tolerated';`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	if err := d.CreateBranch(ctx, "main", "permission_tolerated"); err != nil {
-		t.Fatalf("CreateBranch should tolerate a termination permission error: %v", err)
-	}
-
-	// Comment inspection errors other than sql.ErrNoRows must be returned.
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Catalog inspection errors are never ignored.
 	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
 		WithArgs("myapp_dev_inspection_error").
 		WillReturnError(errors.New("connection broken"))
@@ -408,13 +371,16 @@ func TestCreateBranchWithMock(t *testing.T) {
 		t.Fatalf("expected contextual comment inspection error, got %v", err)
 	}
 
+	// A duplicate target remains an idempotent success.
+	inspect("myapp_dev_duplicate")
+	mock.ExpectExec(`CREATE DATABASE "myapp_dev_duplicate" TEMPLATE "myapp_dev";`).
+		WillReturnError(&pq.Error{Code: "42P04", Message: "database already exists"})
+	if err := d.CreateBranch(ctx, "main", "duplicate"); err != nil {
+		t.Fatalf("expected duplicate database to be idempotent, got %v", err)
+	}
+
 	// Comment write errors are reported after the database is created.
-	mock.ExpectExec(`SELECT pg_terminate_backend\(pid\)`).
-		WithArgs("myapp_dev").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`SELECT d\.description FROM pg_database db LEFT JOIN pg_shdescription d ON d\.objoid = db\.oid WHERE db\.datname = \$1;`).
-		WithArgs("myapp_dev_comment_error").
-		WillReturnRows(sqlmock.NewRows([]string{"description"}))
+	inspect("myapp_dev_comment_error")
 	mock.ExpectExec(`CREATE DATABASE "myapp_dev_comment_error" TEMPLATE "myapp_dev";`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`COMMENT ON DATABASE "myapp_dev_comment_error" IS 'branchbase:branch=comment_error';`).
@@ -428,7 +394,6 @@ func TestCreateBranchWithMock(t *testing.T) {
 		t.Errorf("unfulfilled mock expectations: %v", err)
 	}
 }
-
 func TestDeleteBranchWithMock(t *testing.T) {
 	t.Parallel()
 	db, mock, err := sqlmock.New()

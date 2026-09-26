@@ -256,7 +256,7 @@ func TestDeleteBranchProtection(t *testing.T) {
 	}
 }
 
-func TestCloneWithWALAndSHM(t *testing.T) {
+func TestCreateBranchRefusesLiveWALAndSHMSidecars(t *testing.T) {
 	tempDir := t.TempDir()
 	basePath := filepath.Join(tempDir, "myapp_dev.db")
 
@@ -270,26 +270,12 @@ func TestCloneWithWALAndSHM(t *testing.T) {
 	_ = os.WriteFile(basePath+"-wal", []byte("wal-bytes"), 0o644)
 	_ = os.WriteFile(basePath+"-shm", []byte("shm-bytes"), 0o644)
 
-	if err := drv.CreateBranch(ctx, "main", "wal-test"); err != nil {
-		t.Fatalf("CreateBranch with WAL: %v", err)
+	if err := drv.CreateBranch(ctx, "main", "wal-test"); err == nil {
+		t.Fatal("expected CreateBranch to refuse a source with live SQLite sidecars")
 	}
 
 	targetDB := filepath.Join(tempDir, "myapp_dev_wal_test.db")
-	if _, err := os.Stat(targetDB); err != nil {
-		t.Fatalf("target DB not found: %v", err)
-	}
-	if _, err := os.Stat(targetDB + "-wal"); err != nil {
-		t.Fatalf("target WAL not cloned: %v", err)
-	}
-	if _, err := os.Stat(targetDB + "-shm"); err != nil {
-		t.Fatalf("target SHM not cloned: %v", err)
-	}
-
-	// Clean up branch
-	if err := drv.DeleteBranch(ctx, "wal-test"); err != nil {
-		t.Fatalf("DeleteBranch: %v", err)
-	}
-	if _, err := os.Stat(targetDB + "-wal"); !os.IsNotExist(err) {
-		t.Fatal("target WAL was not cleaned up on DeleteBranch")
+	if _, err := os.Stat(targetDB); !os.IsNotExist(err) {
+		t.Fatalf("target database should not be created when source has sidecars, got stat error %v", err)
 	}
 }

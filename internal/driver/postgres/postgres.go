@@ -55,6 +55,12 @@ func (c Config) adminDatabase() string {
 // The path is the maintenance database (postgres, or template1 when BaseDatabase
 // is already postgres), not the user database that TEMPLATE clone copies.
 func (c Config) DSN() string {
+	return c.DSNForDatabase(c.adminDatabase())
+}
+
+// DSNForDatabase returns a connection URL for a specific database using this
+// driver's configured credentials and transport settings.
+func (c Config) DSNForDatabase(dbName string) string {
 	host := c.Host
 	if host == "" {
 		host = "127.0.0.1"
@@ -63,7 +69,6 @@ func (c Config) DSN() string {
 	if port <= 0 {
 		port = 5432
 	}
-	dbName := c.adminDatabase()
 	sslMode := c.SSLMode
 	if sslMode == "" {
 		sslMode = "disable"
@@ -185,6 +190,22 @@ func (d *PostgresDriver) DB() *sql.DB {
 	return d.db
 }
 
+// OpenDatabase opens a separate pool connected to the requested database. The
+// main driver pool intentionally connects to a maintenance database for CREATE
+// and DROP DATABASE operations, so catalog inspection must use this method.
+func (d *PostgresDriver) OpenDatabase(databaseName string) (*sql.DB, error) {
+	if strings.TrimSpace(databaseName) == "" {
+		return nil, fmt.Errorf("database name cannot be empty")
+	}
+	db, err := sql.Open("postgres", d.cfg.DSNForDatabase(databaseName))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open PostgreSQL database %q: %w", databaseName, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
 func (d *PostgresDriver) Name() string {
 	return "postgres"
 }
@@ -237,16 +258,6 @@ func (d *PostgresDriver) CreateBranch(ctx context.Context, sourceBranch, targetB
 		return fmt.Errorf("source database name %q (%d bytes) exceeds PostgreSQL 63-byte identifier limit", sourceDB, len(sourceDB))
 	}
 
-	// Step 1: Terminate open connections to the source database
-	terminateQuery := `
-		SELECT pg_terminate_backend(pid)
-		FROM pg_stat_activity
-		WHERE datname = $1 AND pid <> pg_backend_pid();
-	`
-	if _, err := d.db.ExecContext(ctx, terminateQuery, sourceDB); err != nil && !isPermissionError(err) {
-		return fmt.Errorf("failed to terminate connections to source database %q: %w", sourceDB, err)
-	}
-
 	// Check collision with existing database comment
 	var existingComment sql.NullString
 	checkCommentQuery := `
@@ -273,6 +284,9 @@ func (d *PostgresDriver) CreateBranch(ctx context.Context, sourceBranch, targetB
 	_, err = d.db.ExecContext(ctx, createQuery)
 	if err != nil {
 		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "55006" {
+			return fmt.Errorf("cannot clone PostgreSQL source database %q while it has active connections; close clients and retry (BranchBase does not terminate unrelated sessions): %w", sourceDB, err)
+		}
 		if errors.As(err, &pqErr) && pqErr.Code == "42P04" {
 			// SQLSTATE 42P04 = duplicate_database, treat as idempotent success
 			return nil

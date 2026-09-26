@@ -403,6 +403,10 @@ func runTUI(cwd string) {
 }
 
 func runSwitch(cwd, targetBranch string, noCreate bool) {
+	if err := git.ValidateBranchNameUnique(cwd, targetBranch); err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot isolate branch database: %v\n", err)
+		os.Exit(1)
+	}
 	sanitized := git.SanitizeBranchName(targetBranch)
 	cfg, err := config.LoadConfig(cwd)
 	if err != nil {
@@ -753,6 +757,10 @@ func runHookTrigger(cwd string, args []string) {
 	if err != nil || branch == "" {
 		return
 	}
+	if err := git.ValidateBranchNameUnique(cwd, branch); err != nil {
+		logHookError(cwd, err.Error())
+		return
+	}
 
 	defaultBranch := cfg.Proxy.DefaultBranch
 	if defaultBranch == "" {
@@ -764,6 +772,45 @@ func runHookTrigger(cwd string, args []string) {
 		return
 	}
 
+	introspector, closeIntrospector := resolveIntrospector(cfg, defaultBranch)
+	defer closeIntrospector()
+	analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
+		RepoRoot:     cwd,
+		Engine:       cfg.Driver,
+		Introspector: introspector,
+	})
+	if err != nil {
+		logHookError(cwd, fmt.Sprintf("risk analyzer initialization failed for %q: %v", sanitized, err))
+		return
+	}
+	migrationFiles, err := changedMigrationFiles(cwd, defaultBranch)
+	if err != nil {
+		logHookError(cwd, fmt.Sprintf("could not identify changed migrations for %q: %v", sanitized, err))
+		return
+	}
+	var assessedRisks []risk.MigrationRisk
+	for _, migrationFile := range migrationFiles {
+		content, err := os.ReadFile(filepath.Join(cwd, migrationFile))
+		if err != nil {
+			logHookError(cwd, fmt.Sprintf("could not read migration %q: %v", migrationFile, err))
+			return
+		}
+		assessment, err := analyzer.AnalyzeSQL(ctx, migrationFile, string(content))
+		if err != nil {
+			logHookError(cwd, fmt.Sprintf("could not analyze migration %q: %v", migrationFile, err))
+			return
+		}
+		assessedRisks = append(assessedRisks, *assessment)
+	}
+	report := analyzer.EvaluateReport(assessedRisks, sanitized)
+	if err := analyzer.SaveReport(report); err != nil {
+		logHookError(cwd, fmt.Sprintf("could not save risk report for %q: %v", sanitized, err))
+	}
+	if report.Blocked || report.RequiresConfirm {
+		logHookError(cwd, fmt.Sprintf("branch %q provisioning paused by risk policy (level %s)", sanitized, report.OverallLevel))
+		return
+	}
+
 	drv, err := getDriverForConfig(cfg, true)
 	if err != nil {
 		logHookError(cwd, fmt.Sprintf("failed to get driver for config: %v", err))
@@ -772,6 +819,10 @@ func runHookTrigger(cwd string, args []string) {
 	defer func() {
 		_ = drv.Close()
 	}()
+	if drv.Name() == "mysql" || drv.Name() == "mariadb" {
+		logHookError(cwd, fmt.Sprintf("deferred prewarming %q to proxy JIT provisioning because MySQL schema replication is visible while it is copied", sanitized))
+		return
+	}
 
 	exists, err := drv.BranchExists(ctx, sanitized)
 	if err != nil {
@@ -780,41 +831,6 @@ func runHookTrigger(cwd string, args []string) {
 	}
 	if exists {
 		return
-	}
-
-	// Evaluate migration risk before provisioning
-	if analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
-		RepoRoot:     cwd,
-		Engine:       cfg.Driver,
-		Introspector: resolveIntrospector(cwd, cfg),
-	}); err == nil {
-		var assessedRisks []risk.MigrationRisk
-		candidates := []string{"migrations", "db/migrations", "sql", "migration"}
-		for _, dir := range candidates {
-			fullDir := filepath.Join(cwd, dir)
-			if entries, err := os.ReadDir(fullDir); err == nil {
-				for _, entry := range entries {
-					if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-						mFile := filepath.Join(dir, entry.Name())
-						if content, err := os.ReadFile(filepath.Join(cwd, mFile)); err == nil {
-							if r, err := analyzer.AnalyzeSQL(ctx, mFile, string(content)); err == nil {
-								assessedRisks = append(assessedRisks, *r)
-							}
-						}
-					}
-				}
-				if len(assessedRisks) > 0 {
-					break
-				}
-			}
-		}
-
-		report := analyzer.EvaluateReport(assessedRisks, sanitized)
-		_ = analyzer.SaveReport(report)
-		if report.Blocked {
-			logHookError(cwd, fmt.Sprintf("branch %q provisioning paused: risk gate policy evaluated CRITICAL risk", sanitized))
-			return
-		}
 	}
 
 	if err := drv.CreateBranch(ctx, defaultBranch, sanitized); err != nil {

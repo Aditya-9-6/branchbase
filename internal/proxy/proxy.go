@@ -26,29 +26,39 @@ import (
 
 // Server is the transparent TCP & UNIX socket proxy forwarder
 type Server struct {
-	cfg          *config.Config
-	repoPath     string
-	drv          driver.Driver
-	listener     net.Listener
-	wg           sync.WaitGroup
-	keyLock      *keyedMutex
-	mu           sync.Mutex
-	stopped      bool
-	activeConns  map[net.Conn]struct{}
-	activeMu     sync.Mutex
-	tlsConfig    *tls.Config
-	drainTimeout time.Duration
+	cfg             *config.Config
+	repoPath        string
+	drv             driver.Driver
+	listener        net.Listener
+	wg              sync.WaitGroup
+	keyLock         *keyedMutex
+	mu              sync.Mutex
+	stopped         bool
+	activeConns     map[net.Conn]struct{}
+	connectionSlots chan struct{}
+	activeMu        sync.Mutex
+	branchCheckMu   sync.Mutex
+	branchChecks    map[string]struct{}
+	tlsConfig       *tls.Config
+	drainTimeout    time.Duration
 }
+
+const (
+	maxConcurrentConnections = 256
+	startupTimeout           = 10 * time.Second
+)
 
 // NewServer initializes a new transparent proxy server
 func NewServer(cfg *config.Config, repoPath string, drv driver.Driver) *Server {
 	return &Server{
-		cfg:          cfg,
-		repoPath:     repoPath,
-		drv:          drv,
-		keyLock:      newKeyedMutex(),
-		activeConns:  make(map[net.Conn]struct{}),
-		drainTimeout: 500 * time.Millisecond,
+		cfg:             cfg,
+		repoPath:        repoPath,
+		drv:             drv,
+		keyLock:         newKeyedMutex(),
+		activeConns:     make(map[net.Conn]struct{}),
+		connectionSlots: make(chan struct{}, maxConcurrentConnections),
+		branchChecks:    make(map[string]struct{}),
+		drainTimeout:    500 * time.Millisecond,
 	}
 }
 
@@ -93,7 +103,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		log.Printf("[BranchBase Proxy] 🌿 Transparent proxy listening on UNIX socket: %s", socketPath)
 	} else {
-		addr := fmt.Sprintf(":%d", s.cfg.Proxy.ListenPort)
+		host := strings.TrimSpace(s.cfg.Proxy.ListenHost)
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		addr := net.JoinHostPort(host, fmt.Sprintf("%d", s.cfg.Proxy.ListenPort))
 		l, err = net.Listen("tcp", addr)
 		if err != nil {
 			return fmt.Errorf("failed to bind proxy to %s: %w", addr, err)
@@ -217,6 +231,23 @@ func (s *Server) closeActiveConns() {
 	}
 }
 
+func (s *Server) validateBranchIdentity(branch string) error {
+	s.branchCheckMu.Lock()
+	if _, checked := s.branchChecks[branch]; checked {
+		s.branchCheckMu.Unlock()
+		return nil
+	}
+	s.branchCheckMu.Unlock()
+
+	if err := git.ValidateBranchNameUnique(s.repoPath, branch); err != nil {
+		return err
+	}
+	s.branchCheckMu.Lock()
+	s.branchChecks[branch] = struct{}{}
+	s.branchCheckMu.Unlock()
+	return nil
+}
+
 func (s *Server) acceptLoop(ctx context.Context) {
 	defer s.wg.Done()
 
@@ -267,6 +298,13 @@ func (s *Server) acceptLoop(ctx context.Context) {
 			}
 		}
 
+		select {
+		case s.connectionSlots <- struct{}{}:
+		default:
+			_ = clientConn.Close()
+			continue
+		}
+
 		s.wg.Add(1)
 		go func(c net.Conn) {
 			defer s.wg.Done()
@@ -279,43 +317,20 @@ func (s *Server) ensureBranchExists(targetBranch, defaultBranch string) error {
 	if s.drv == nil {
 		return nil
 	}
+	if s.keyLock != nil {
+		unlock := s.keyLock.Lock(targetBranch)
+		defer unlock()
+	}
 
-	fastCtx, fastCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer fastCancel()
-
-	exists, err := s.drv.BranchExists(fastCtx, targetBranch)
+	provCtx, provCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer provCancel()
+	exists, err := s.drv.BranchExists(provCtx, targetBranch)
 	if err != nil {
 		return fmt.Errorf("failed to check branch existence for %q: %w", targetBranch, err)
 	}
 	if exists {
 		return nil
 	}
-
-	if s.keyLock != nil {
-		unlock := s.keyLock.Lock(targetBranch)
-		defer unlock()
-
-		provCtx, provCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer provCancel()
-
-		exists, err = s.drv.BranchExists(provCtx, targetBranch)
-		if err != nil {
-			return fmt.Errorf("failed to check branch existence under lock for %q: %w", targetBranch, err)
-		}
-		if exists {
-			return nil
-		}
-
-		log.Printf("[BranchBase Proxy] 🪄 JIT provisioning database for branch %q from %q...", targetBranch, defaultBranch)
-		if err := s.drv.CreateBranch(provCtx, defaultBranch, targetBranch); err != nil {
-			return fmt.Errorf("failed to JIT provision branch %q: %w", targetBranch, err)
-		}
-		log.Printf("[BranchBase Proxy] ✅ JIT provisioned database for branch %q", targetBranch)
-		return nil
-	}
-
-	provCtx, provCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer provCancel()
 
 	log.Printf("[BranchBase Proxy] 🪄 JIT provisioning database for branch %q from %q...", targetBranch, defaultBranch)
 	if err := s.drv.CreateBranch(provCtx, defaultBranch, targetBranch); err != nil {
@@ -344,6 +359,11 @@ func (s *Server) dialBackend() (net.Conn, string, error) {
 }
 
 func (s *Server) handleConnection(clientConn net.Conn) {
+	defer func() { <-s.connectionSlots }()
+	if err := clientConn.SetDeadline(time.Now().Add(startupTimeout)); err != nil {
+		_ = clientConn.Close()
+		return
+	}
 	s.addActiveConn(clientConn)
 	defer func() {
 		s.removeActiveConn(clientConn)
@@ -355,13 +375,19 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	if err != nil {
 		activeBranch = s.cfg.Proxy.DefaultBranch
 	}
-	sanitizedBranch := git.SanitizeBranchName(activeBranch)
-	targetDB := s.cfg.DatabaseNameForBranch(sanitizedBranch)
-
 	defaultBranch := s.cfg.Proxy.DefaultBranch
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
+	if activeBranch != "" {
+		if err := s.validateBranchIdentity(activeBranch); err != nil {
+			log.Printf("[BranchBase Proxy] ❌ Branch database identity is ambiguous: %v", err)
+			_, _ = clientConn.Write(pgwire.BuildErrorResponse("FATAL", "3D000", err.Error()))
+			return
+		}
+	}
+	sanitizedBranch := git.SanitizeBranchName(activeBranch)
+	targetDB := s.cfg.DatabaseNameForBranch(sanitizedBranch)
 
 	// 1b. JIT branch provisioning
 	if s.drv != nil && sanitizedBranch != git.SanitizeBranchName(defaultBranch) {
@@ -436,6 +462,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 				return
 			}
 		}
+	}
+	if err := clientConn.SetDeadline(time.Time{}); err != nil {
+		return
 	}
 
 	// Rewrite database identifier

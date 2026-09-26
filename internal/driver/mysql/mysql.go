@@ -3,6 +3,8 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -188,7 +190,7 @@ func (d *MySQLDriver) BranchExists(ctx context.Context, branchName string) (bool
 }
 
 // CreateBranch clones sourceBranch into targetBranch by replicating tables and rows.
-func (d *MySQLDriver) CreateBranch(ctx context.Context, sourceBranch, targetBranch string) error {
+func (d *MySQLDriver) CreateBranch(ctx context.Context, sourceBranch, targetBranch string) (retErr error) {
 	if d.db == nil {
 		return fmt.Errorf("mysql connection not initialized")
 	}
@@ -196,10 +198,22 @@ func (d *MySQLDriver) CreateBranch(ctx context.Context, sourceBranch, targetBran
 	targetDB := d.formatDBName(targetBranch)
 
 	// Step 1: Create target database schema
-	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s;", QuoteIdentifier(targetDB))
+	createDBSQL := fmt.Sprintf("CREATE DATABASE %s;", QuoteIdentifier(targetDB))
 	if _, err := d.db.ExecContext(ctx, createDBSQL); err != nil {
 		return fmt.Errorf("failed to create database %q: %w", targetDB, err)
 	}
+	created := true
+	defer func() {
+		if retErr == nil || !created {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		dropSQL := fmt.Sprintf("DROP DATABASE IF EXISTS %s;", QuoteIdentifier(targetDB))
+		if _, err := d.db.ExecContext(cleanupCtx, dropSQL); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to remove incomplete branch database %q: %w", targetDB, err))
+		}
+	}()
 
 	// Hold one session for SET FOREIGN_KEY_CHECKS + table copies. Pool connections
 	// would otherwise apply the session variable to a different connection than
@@ -216,7 +230,15 @@ func (d *MySQLDriver) CreateBranch(ctx context.Context, sourceBranch, targetBran
 		return fmt.Errorf("failed to disable foreign key checks: %w", err)
 	}
 	defer func() {
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "SET FOREIGN_KEY_CHECKS=1")
+		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := conn.ExecContext(resetCtx, "SET FOREIGN_KEY_CHECKS=1"); err != nil {
+			rawErr := conn.Raw(func(any) error { return sqldriver.ErrBadConn })
+			if rawErr != nil && !errors.Is(rawErr, sqldriver.ErrBadConn) {
+				retErr = errors.Join(retErr, fmt.Errorf("failed to discard MySQL session after foreign key reset failure: %w", rawErr))
+			}
+			retErr = errors.Join(retErr, fmt.Errorf("failed to restore MySQL foreign key checks: %w", err))
+		}
 	}()
 
 	// Step 2: Query tables from source database

@@ -38,6 +38,7 @@ type TLSConfig struct {
 
 type ProxyConfig struct {
 	Enabled       bool      `json:"enabled" yaml:"enabled"`
+	ListenHost    string    `json:"listen_host" yaml:"listen_host"`
 	ListenPort    int       `json:"listen_port" yaml:"listen_port"`
 	DefaultBranch string    `json:"default_branch" yaml:"default_branch"`
 	SocketPath    string    `json:"socket_path,omitempty" yaml:"socket_path,omitempty"` // For UNIX domain sockets
@@ -64,6 +65,7 @@ func DefaultConfig() Config {
 		},
 		Proxy: ProxyConfig{
 			Enabled:       true,
+			ListenHost:    "127.0.0.1",
 			ListenPort:    5432,
 			DefaultBranch: "main",
 		},
