@@ -130,15 +130,78 @@ func (p *RiskPolicy) IsPathExcluded(filePath string) bool {
 	return false
 }
 
-// MatchesAlwaysCritical checks if raw SQL contains any always-critical pattern.
+// MatchesAlwaysCritical checks executable SQL tokens for configured critical patterns.
 func (p *RiskPolicy) MatchesAlwaysCritical(sql string) (bool, string) {
-	upperSQL := strings.ToUpper(sql)
+	upperSQL := strings.ToUpper(sqlForPolicyMatching(sql))
 	for _, pattern := range p.AlwaysCritical {
-		if strings.Contains(upperSQL, strings.ToUpper(pattern)) {
+	if normalized := strings.ToUpper(sqlForPolicyMatching(pattern)); normalized != "" && strings.Contains(upperSQL, normalized) {
 			return true, pattern
 		}
 	}
 	return false, ""
+}
+
+// sqlForPolicyMatching removes comments, quoted values, and quoted identifiers
+// before applying policy phrases, so examples and data literals cannot trigger
+// destructive-operation overrides.
+func sqlForPolicyMatching(sql string) string {
+	var out strings.Builder
+	writeSpace := func() {
+		if out.Len() > 0 {
+			current := out.String()
+			if current[len(current)-1] != ' ' {
+				out.WriteByte(' ')
+			}
+		}
+	}
+
+	for i := 0; i < len(sql); {
+		switch {
+		case sql[i] == '#' || i+1 < len(sql) && sql[i:i+2] == "--":
+			if sql[i] == '#' { i++ } else { i += 2 }
+			for i < len(sql) && sql[i] != '\n' && sql[i] != '\r' { i++ }
+			writeSpace()
+		case i+1 < len(sql) && sql[i:i+2] == "/*":
+			depth := 1
+			i += 2
+			for i < len(sql) && depth > 0 {
+				if i+1 < len(sql) && sql[i:i+2] == "/*" { depth++; i += 2; continue }
+				if i+1 < len(sql) && sql[i:i+2] == "*/" { depth--; i += 2; continue }
+				i++
+			}
+			writeSpace()
+		case sql[i] == '$':
+			end := i + 1
+			for end < len(sql) && (sql[end] == '_' || sql[end] >= 'a' && sql[end] <= 'z' || sql[end] >= 'A' && sql[end] <= 'Z' || sql[end] >= '0' && sql[end] <= '9') { end++ }
+			if end < len(sql) && sql[end] == '$' {
+				tag := sql[i : end+1]
+				if closeAt := strings.Index(sql[end+1:], tag); closeAt >= 0 {
+					i = end + 1 + closeAt + len(tag)
+					writeSpace()
+					continue
+				}
+			}
+			out.WriteByte(sql[i])
+			i++
+		case sql[i] == '\'' || sql[i] == '"' || sql[i] == '`':
+			quote := sql[i]
+			i++
+			for i < len(sql) {
+				if sql[i] == quote {
+					if i+1 < len(sql) && sql[i+1] == quote { i += 2; continue }
+					i++
+					break
+				}
+				if sql[i] == '\\' && quote == '\'' && i+1 < len(sql) { i += 2; continue }
+				i++
+			}
+			writeSpace()
+		default:
+			out.WriteByte(sql[i])
+			i++
+		}
+	}
+	return strings.Join(strings.Fields(out.String()), " ")
 }
 
 // Evaluate determines the policy action for a given migration risk assessment.

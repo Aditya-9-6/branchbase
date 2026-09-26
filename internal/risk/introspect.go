@@ -39,6 +39,7 @@ func (p *PostgresIntrospector) IntrospectTable(ctx context.Context, tableName st
 		SELECT column_name
 		FROM information_schema.columns
 		WHERE table_name = $1
+		  AND table_schema = current_schema()
 		ORDER BY ordinal_position ASC;
 	`
 	rows, err := p.db.QueryContext(ctx, colQuery, cleanTable)
@@ -69,13 +70,16 @@ func (p *PostgresIntrospector) IntrospectTable(ctx context.Context, tableName st
 			ccu.column_name AS to_column
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu 
-			ON tc.constraint_name = kcu.constraint_name 
-			AND tc.table_schema = kcu.table_schema
+			ON tc.constraint_catalog = kcu.constraint_catalog
+			AND tc.constraint_schema = kcu.constraint_schema
+			AND tc.constraint_name = kcu.constraint_name
 		JOIN information_schema.constraint_column_usage ccu 
-			ON ccu.constraint_name = tc.constraint_name 
-			AND ccu.table_schema = tc.table_schema
+			ON ccu.constraint_catalog = tc.constraint_catalog
+			AND ccu.constraint_schema = tc.constraint_schema
+			AND ccu.constraint_name = tc.constraint_name
 		WHERE tc.constraint_type = 'FOREIGN KEY'
-		  AND ccu.table_name = $1;
+		  AND ccu.table_name = $1
+		  AND ccu.table_schema = current_schema();
 	`
 	inboundRows, err := p.db.QueryContext(ctx, inboundFKQuery, cleanTable)
 	if err != nil {
@@ -105,13 +109,16 @@ func (p *PostgresIntrospector) IntrospectTable(ctx context.Context, tableName st
 			ccu.column_name AS to_column
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu 
-			ON tc.constraint_name = kcu.constraint_name 
-			AND tc.table_schema = kcu.table_schema
+			ON tc.constraint_catalog = kcu.constraint_catalog
+			AND tc.constraint_schema = kcu.constraint_schema
+			AND tc.constraint_name = kcu.constraint_name
 		JOIN information_schema.constraint_column_usage ccu 
-			ON ccu.constraint_name = tc.constraint_name 
-			AND ccu.table_schema = tc.table_schema
+			ON ccu.constraint_catalog = tc.constraint_catalog
+			AND ccu.constraint_schema = tc.constraint_schema
+			AND ccu.constraint_name = tc.constraint_name
 		WHERE tc.constraint_type = 'FOREIGN KEY'
-		  AND tc.table_name = $1;
+		  AND tc.table_name = $1
+		  AND tc.table_schema = current_schema();
 	`
 	outboundRows, err := p.db.QueryContext(ctx, outboundFKQuery, cleanTable)
 	if err != nil {

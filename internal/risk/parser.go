@@ -36,17 +36,66 @@ var (
 	reRenameTable   = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+([^\s;]+)\s+RENAME\s+TO\s+([^\s;,]+)`)
 )
 
-// StripCommentsAndTransactions cleans SQL content by removing comments and transaction wrappers.
+// StripCommentsAndTransactions removes SQL comments without changing quoted bodies.
+// SplitStatements separately filters transaction-control statements.
 func StripCommentsAndTransactions(sql string) string {
-	// Remove block comments /* ... */
-	reBlockComments := regexp.MustCompile(`(?s)/\*.*?\*/`)
-	sql = reBlockComments.ReplaceAllString(sql, "")
-
-	// Remove line comments -- ...
-	reLineComments := regexp.MustCompile(`--[^\r\n]*`)
-	sql = reLineComments.ReplaceAllString(sql, "")
-
-	return strings.TrimSpace(sql)
+	var out strings.Builder
+	writeSpace := func() {
+		if out.Len() > 0 && out.String()[out.Len()-1] != ' ' {
+			out.WriteByte(' ')
+		}
+	}
+	for i := 0; i < len(sql); {
+		if sql[i] == '#' || i+1 < len(sql) && sql[i:i+2] == "--" {
+			if sql[i] == '#' { i++ } else { i += 2 }
+			for i < len(sql) && sql[i] != '\n' && sql[i] != '\r' { i++ }
+			writeSpace()
+			continue
+		}
+		if i+1 < len(sql) && sql[i:i+2] == "/*" {
+			depth := 1
+			i += 2
+			for i < len(sql) && depth > 0 {
+				if i+1 < len(sql) && sql[i:i+2] == "/*" { depth++; i += 2; continue }
+				if i+1 < len(sql) && sql[i:i+2] == "*/" { depth--; i += 2; continue }
+				i++
+			}
+			writeSpace()
+			continue
+		}
+		if sql[i] == '$' {
+			end := i + 1
+			for end < len(sql) && (sql[end] == '_' || sql[end] >= 'a' && sql[end] <= 'z' || sql[end] >= 'A' && sql[end] <= 'Z' || sql[end] >= '0' && sql[end] <= '9') { end++ }
+			if end < len(sql) && sql[end] == '$' {
+				tag := sql[i : end+1]
+				if closeAt := strings.Index(sql[end+1:], tag); closeAt >= 0 {
+					closeAt += end + 1 + len(tag)
+					out.WriteString(sql[i:closeAt])
+					i = closeAt
+					continue
+				}
+			}
+		}
+		if sql[i] == '\'' || sql[i] == '"' || sql[i] == '`' {
+			quote := sql[i]
+			out.WriteByte(sql[i])
+			i++
+			for i < len(sql) {
+				out.WriteByte(sql[i])
+				if sql[i] == quote {
+					if i+1 < len(sql) && sql[i+1] == quote { out.WriteByte(sql[i+1]); i += 2; continue }
+				i++
+					break
+				}
+				if sql[i] == '\\' && quote == '\'' && i+1 < len(sql) { out.WriteByte(sql[i+1]); i += 2; continue }
+				i++
+			}
+			continue
+		}
+		out.WriteByte(sql[i])
+		i++
+	}
+	return strings.TrimSpace(out.String())
 }
 
 // SplitStatements splits a SQL string by semicolon into individual executable statements.
@@ -107,6 +156,12 @@ func SplitStatements(sql string) []string {
 		}
 
 		if !inDollarQuote {
+			if r == '\\' && inSingleQuote && i+1 < n {
+				current.WriteRune(r)
+				i++
+				current.WriteRune(runes[i])
+				continue
+			}
 			if r == '\'' && !inDoubleQuote {
 				inSingleQuote = !inSingleQuote
 			} else if r == '"' && !inSingleQuote {

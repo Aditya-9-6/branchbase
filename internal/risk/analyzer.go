@@ -162,6 +162,24 @@ func (a *RiskAnalyzer) AnalyzeSQL(ctx context.Context, fileName, sqlContent stri
 			return nil, fmt.Errorf("classification failed: %w", err)
 		}
 	}
+	if tableMeta == nil {
+		for _, op := range ops {
+			if op.Type == "DROP_COLUMN" {
+				riskResult.Level = maxLevel(riskResult.Level, RiskHigh)
+				riskResult.Flags = append(riskResult.Flags, "FK impact unknown: catalog metadata unavailable")
+				break
+			}
+		}
+	}
+	for _, op := range ops {
+		if op.Type == "GENERIC_DDL" && !reDataManipulation.MatchString(op.RawSQL) {
+			riskResult.Level = maxLevel(riskResult.Level, RiskHigh)
+			riskResult.Flags = append(riskResult.Flags, "UNCLASSIFIED SQL statement")
+			if riskResult.Details == "" {
+				riskResult.Details = "This SQL statement is outside the supported migration parser; review it manually before applying."
+			}
+		}
+	}
 
 	if isCritical {
 		riskResult.Level = RiskCritical

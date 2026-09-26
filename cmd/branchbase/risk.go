@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -95,27 +98,85 @@ Flags:
   --policy <p> Path to custom risk-policy.yml`)
 }
 
-func resolveIntrospector(cwd string, cfg *config.Config) risk.SchemaIntrospector {
+func resolveIntrospector(cfg *config.Config, schemaBranch string) (risk.SchemaIntrospector, func()) {
 	if cfg == nil {
-		return risk.NewMockIntrospector()
+		return risk.NewMockIntrospector(), func() {}
+	}
+	if schemaBranch == "" {
+		schemaBranch = cfg.Proxy.DefaultBranch
+	}
+	if schemaBranch == "" {
+		schemaBranch = "main"
 	}
 
 	drv, err := getDriverForConfig(cfg, true)
 	if err != nil {
-		return risk.NewMockIntrospector()
+		return risk.NewMockIntrospector(), func() {}
 	}
 
 	if drv.Name() == "postgres" {
-		if pgDrv, ok := drv.(interface{ DB() interface{} }); ok {
-			if dbHandle, ok := pgDrv.DB().(interface {
-				QueryContext(ctx context.Context, query string, args ...interface{}) (*risk.PostgresIntrospector, error)
-			}); ok {
-				_ = dbHandle
+		if pgDrv, ok := drv.(interface{ OpenDatabase(string) (*sql.DB, error) }); ok {
+			databaseName := cfg.DatabaseNameForBranch(git.SanitizeBranchName(schemaBranch))
+			db, err := pgDrv.OpenDatabase(databaseName)
+			_ = drv.Close()
+			if err == nil {
+				return risk.NewPostgresIntrospector(db), func() { _ = db.Close() }
 			}
 		}
 	}
 
-	return risk.NewMockIntrospector()
+	_ = drv.Close()
+	return risk.NewMockIntrospector(), func() {}
+}
+
+func changedMigrationFiles(repoRoot, defaultBranch string) ([]string, error) {
+	if strings.TrimSpace(defaultBranch) == "" {
+		defaultBranch = "main"
+	}
+	var baseRef string
+	for _, candidate := range []string{defaultBranch, "origin/" + defaultBranch} {
+		if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", candidate+"^{commit}").Run(); err == nil {
+			baseRef = candidate
+			break
+		}
+	}
+	if baseRef == "" {
+		return nil, fmt.Errorf("cannot resolve default branch %q locally or as origin/%s", defaultBranch, defaultBranch)
+	}
+
+	mergeBase, err := exec.Command("git", "-C", repoRoot, "merge-base", baseRef, "HEAD").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot find merge base with %q: %w", baseRef, err)
+	}
+	mergeBaseHash := strings.TrimSpace(string(mergeBase))
+	changed, err := exec.Command("git", "-C", repoRoot, "diff", "--name-only", "--diff-filter=ACMR", mergeBaseHash, "--", "*.sql").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list changed SQL files: %w", err)
+	}
+	untracked, err := exec.Command("git", "-C", repoRoot, "ls-files", "--others", "--exclude-standard", "--", "*.sql").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list untracked SQL files: %w", err)
+	}
+
+	unique := make(map[string]struct{})
+	var files []string
+	for _, line := range strings.Split(string(changed)+"\n"+string(untracked), "\n") {
+		path := filepath.ToSlash(strings.TrimSpace(line))
+		if path == "" {
+			continue
+		}
+		for _, root := range []string{"migrations/", "db/migrations/", "sql/", "migration/"} {
+			if strings.HasPrefix(path, root) {
+				if _, exists := unique[path]; !exists {
+					unique[path] = struct{}{}
+					files = append(files, filepath.FromSlash(path))
+				}
+				break
+			}
+		}
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 func resolveClassifier(offline bool) risk.RiskClassifier {
@@ -147,12 +208,18 @@ func runRiskAnalyze(cwd, targetFile string, jsonOutput, githubOutput, offline bo
 		engine = cfg.Driver
 	}
 
+	schemaBranch := ""
+	if branch, err := git.ResolveCurrentBranch(cwd); err == nil {
+		schemaBranch = branch
+	}
+	introspector, closeIntrospector := resolveIntrospector(cfg, schemaBranch)
+	defer closeIntrospector()
 	analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
 		RepoRoot:     cwd,
 		Engine:       engine,
 		Offline:      offline,
 		Classifier:   resolveClassifier(offline),
-		Introspector: resolveIntrospector(cwd, cfg),
+		Introspector: introspector,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize risk analyzer: %v\n", err)
@@ -202,6 +269,12 @@ func runRiskCheck(cwd, branchName, policyPath string, force, offline, jsonOutput
 		engine = cfg.Driver
 	}
 
+	defaultBranch := "main"
+	if cfg != nil && cfg.Proxy.DefaultBranch != "" {
+		defaultBranch = cfg.Proxy.DefaultBranch
+	}
+	introspector, closeIntrospector := resolveIntrospector(cfg, branchName)
+	defer closeIntrospector()
 	analyzer, err := risk.NewRiskAnalyzer(risk.AnalyzeOptions{
 		RepoRoot:     cwd,
 		Engine:       engine,
@@ -209,28 +282,17 @@ func runRiskCheck(cwd, branchName, policyPath string, force, offline, jsonOutput
 		Force:        force,
 		PolicyPath:   policyPath,
 		Classifier:   resolveClassifier(offline),
-		Introspector: resolveIntrospector(cwd, cfg),
+		Introspector: introspector,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize risk analyzer: %v\n", err)
 		os.Exit(2)
 	}
 
-	// Discover migration files in migrations/ directory if present
-	var migrationFiles []string
-	candidates := []string{"migrations", "db/migrations", "sql", "migration"}
-	for _, dir := range candidates {
-		fullDir := filepath.Join(cwd, dir)
-		if entries, err := os.ReadDir(fullDir); err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-					migrationFiles = append(migrationFiles, filepath.Join(dir, entry.Name()))
-				}
-			}
-			if len(migrationFiles) > 0 {
-				break
-			}
-		}
+	migrationFiles, err := changedMigrationFiles(cwd, defaultBranch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to identify pending migrations: %v\n", err)
+		os.Exit(3)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -241,12 +303,14 @@ func runRiskCheck(cwd, branchName, policyPath string, force, offline, jsonOutput
 		fullPath := filepath.Join(cwd, f)
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
-			continue
+			fmt.Fprintf(os.Stderr, "Failed to read migration %s: %v\n", f, err)
+			os.Exit(3)
 		}
 
 		res, err := analyzer.AnalyzeSQL(ctx, f, string(content))
 		if err != nil {
-			continue
+			fmt.Fprintf(os.Stderr, "Failed to analyze migration %s: %v\n", f, err)
+			os.Exit(3)
 		}
 		assessedRisks = append(assessedRisks, *res)
 	}

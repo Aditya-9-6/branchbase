@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// HeuristicClassifier evaluates migration risk using deterministic AST/regex rules and catalog metadata.
+// HeuristicClassifier evaluates migration risk using deterministic statement rules and catalog metadata.
 type HeuristicClassifier struct{}
 
 // NewHeuristicClassifier returns an instance of HeuristicClassifier.
@@ -108,6 +108,10 @@ func (h *HeuristicClassifier) Classify(ctx context.Context, input Classification
 			} else {
 				level = maxLevel(level, RiskHigh)
 				flags = append(flags, fmt.Sprintf("DROP COLUMN %s.%s", op.TargetTable, colName))
+				if input.TableMetadata == nil || len(input.TableMetadata.Columns) == 0 {
+					flags = append(flags, "FK impact unknown: catalog metadata unavailable")
+					details = append(details, "The database catalog could not confirm whether foreign keys reference this column.")
+				}
 				suggestions = append(suggestions, fmt.Sprintf("Ensure column %q has been decommissioned from application code in prior release before dropping.", colName))
 			}
 
@@ -167,6 +171,23 @@ func (h *HeuristicClassifier) Classify(ctx context.Context, input Classification
 		case "CREATE_TABLE":
 			level = maxLevel(level, RiskLow)
 			reversible = true
+
+		case "GENERIC_DDL":
+			if reDataManipulation.MatchString(op.RawSQL) {
+				category = CategoryDataMigration
+				if !strings.Contains(upperSQL, "WHERE") {
+					level = maxLevel(level, RiskHigh)
+					destructive = true
+					flags = append(flags, "DML UPDATE/DELETE without WHERE clause")
+					details = append(details, "Data modification without WHERE clause modifies all rows in table.")
+				} else {
+					level = maxLevel(level, RiskMedium)
+				}
+			} else {
+				level = maxLevel(level, RiskHigh)
+				flags = append(flags, "UNCLASSIFIED SQL statement")
+				details = append(details, "This SQL statement is outside the supported migration parser; review it manually before applying.")
+			}
 
 		case "RENAME_COLUMN", "RENAME_TABLE":
 			level = maxLevel(level, RiskMedium)
