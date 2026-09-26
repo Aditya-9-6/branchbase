@@ -76,6 +76,22 @@ This document outlines the milestones and engineering priorities for **BranchBas
   - [x] Native Git worktree detection (`ResolveCurrentBranch`) and hook lifecycle (`InstallHooks`, `UninstallHooks`, `AreHooksInstalled`) across linked worktrees.
   - [x] Non-conflicting proxy port resolution and connection pooling across isolated worktree instances.
 
+### Phase 4: Risk Gate & Typed Migration Safety (v0.4.0)
+*Focus: Automated schema migration risk classification, TypeSafe Jev integration, sub-millisecond caching, and Git hook safety.*
+- [x] **Core Risk Model & Declarative Policy Engine:**
+  - `RiskLevel` (LOW/MEDIUM/HIGH/CRITICAL), `MigCategory`, and `MigrationRisk` domain structures.
+  - `.branchbase/risk-policy.yml` policy loader with path exclusions and confidence auto-escalation.
+- [x] **Deterministic Offline Classifier:**
+  - Multi-engine DDL parser (PostgreSQL, MySQL, SQLite) detecting destructive operations and `ACCESS EXCLUSIVE` table locks.
+- [x] **Live Catalog Introspection & FK Breakage Detection:**
+  - PostgreSQL `information_schema` foreign key reference analyzer.
+- [x] **TypeSafe Jev System One Integration:**
+  - Typed questions (Choice and Noul) with calibrated probabilities for data loss, FK disruption, and reversibility.
+- [x] **Sub-millisecond Composite Cache:**
+  - Deterministic `SHA256(migration_sql + schema_signature)` cache for instantaneous git checkouts.
+- [x] **Git Hook & CLI Integration:**
+  - `branchbase risk analyze` and `branchbase risk check` commands with standard Unix exit codes and TTY-safe interactive prompts.
+
 ---
 
 ## Open Tasks & Good First Issues

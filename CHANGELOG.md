@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **BranchBase Risk Gate (`branchbase risk`)**: Automated schema migration risk classification engine safeguarding preview and branch databases from destructive DDL (#95).
+- **TypeSafe Jev System One Integration (`internal/risk/jev.go`)**: Multi-question typed classification with calibrated probabilities for data loss, foreign key impact, and table locking.
+- **Deterministic Heuristic Offline Classifier (`internal/risk/heuristic.go`)**: Zero-dependency offline rule engine covering PostgreSQL, MySQL, and SQLite dialects.
+- **Sub-millisecond Composite Cache (`internal/risk/cache.go`)**: Deterministic `SHA256(migration_sql + schema_signature)` cache in `.branchbase/cache/risk_cache.json`.
+- **Database Catalog Introspection (`internal/risk/introspect.go`)**: Live PostgreSQL `information_schema` foreign key constraint inspector.
+- **Policy Engine as Code (`.branchbase/risk-policy.yml`)**: Declarative configuration for risk thresholds, actions (`allow`, `warn`, `confirm`, `block`), and exclusion globs.
+- **TTY Detection & Safe Prompts (`internal/risk/tty.go`)**: Non-blocking fail-safe confirmation in non-interactive terminal contexts (VS Code Git, GUI clients).
+
 ### Fixed
 - Compare `DatabaseNameForBranch` against a sanitized `DefaultBranch` so names like `release/v1` resolve to the base database instead of `base_release_v1` (#91).
 
